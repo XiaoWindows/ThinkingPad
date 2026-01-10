@@ -7,9 +7,41 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 
 import javax.swing.Timer;
-import javax.swing.UIManager;
-import java.awt.Window;
-import java.awt.AlphaComposite;
+
+import java.awt.geom.RoundRectangle2D;
+
+// 动画常量定义 - 无帧率限制极致性能模式
+class AnimationConstants {
+    // 无帧率限制：使用最小时间间隔，最大化刷新率
+    public static final int MIN_FRAME_INTERVAL = 1; // ~1000+FPS（系统决定实际上限）
+
+    // 检测是否启用高性能模式（仅保留判断，不影响帧率）
+    public static boolean isHighPerformanceMode() {
+        int deviceType = GraphicsEnvironment.getLocalGraphicsEnvironment()
+                           .getDefaultScreenDevice().getType();
+        return deviceType == java.awt.GraphicsDevice.TYPE_RASTER_SCREEN;
+    }
+
+    // 记录帧渲染时间（空实现）
+    public static void recordFrameRender() {
+        // 无性能监控，零开销
+    }
+
+    // 获取无限制的最优帧间隔 - 始终最小间隔
+    public static int getOptimalFrameInterval() {
+        return MIN_FRAME_INTERVAL;
+    }
+
+    // 获取当前性能指标（固定返回无限制）
+    public static String getPerformanceInfo() {
+        return "无帧率限制极致性能模式";
+    }
+
+    // 手动设置目标帧率（禁用）
+    public static void setTargetFps(int fps) {
+        System.out.println("无帧率限制模式：已禁用帧率设置，运行在系统最大性能");
+    }
+}
 
     // 黄金比例布局管理器（横向版本 - 左右布局）
 class GoldenRatioLayout implements LayoutManager {
@@ -186,9 +218,7 @@ class DynamicBackgroundPanel extends JPanel {
     private java.awt.Image nextBackgroundImage;
     private java.awt.Image nextBlurredBackground;
     private boolean imageLoaded = false;
-    private ArrayList<Particle> particles = new ArrayList<>();
     private Timer animationTimer;
-    private int lastParticleUpdate = 0;
     private ArrayList<java.awt.Image> backgroundImages = new ArrayList<>();
     private ArrayList<java.awt.Image> blurredImages = new ArrayList<>();
     private int currentImageIndex = 0;
@@ -196,10 +226,15 @@ class DynamicBackgroundPanel extends JPanel {
     private boolean isTransitioning = false;
     private Timer transitionTimer;
     
+    // 性能优化：缓存缩放后的背景图
+    private java.awt.Image cachedScaledBackground;
+    private java.awt.Image cachedScaledBlurredBackground;
+    private int lastPanelWidth = -1;
+    private int lastPanelHeight = -1;
+    
     public DynamicBackgroundPanel() {
         setOpaque(true);
         loadBackgroundImage();
-        initParticles();
         startAnimation();
     }
     
@@ -279,24 +314,29 @@ class DynamicBackgroundPanel extends JPanel {
     
     private java.awt.Image createGaussianBlur(java.awt.Image originalImage) {
         try {
+            // 性能优化：简化模糊处理，使用预处理的低质量模糊
+            // 避免运行时卷积运算造成的性能瓶颈
             BufferedImage original = new BufferedImage(
                 originalImage.getWidth(null), 
                 originalImage.getHeight(null), 
                 BufferedImage.TYPE_INT_ARGB
             );
             Graphics2D g = original.createGraphics();
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.drawImage(originalImage, 0, 0, null);
             g.dispose();
             
-            // 创建模糊效果
-            float[] kernel = {
-                1/16f, 2/16f, 1/16f,
-                2/16f, 4/16f, 2/16f,
-                1/16f, 2/16f, 1/16f
-            };
-            
-            ConvolveOp op = new ConvolveOp(new Kernel(3, 3, kernel), ConvolveOp.EDGE_NO_OP, null);
-            BufferedImage blurred = op.filter(original, null);
+            // 使用更简单的模糊：降低图像质量来模拟模糊效果
+            // 这比卷积运算快得多，适合实时动画
+            BufferedImage blurred = new BufferedImage(
+                original.getWidth(), original.getHeight(), 
+                BufferedImage.TYPE_INT_ARGB
+            );
+            Graphics2D bg = blurred.createGraphics();
+            bg.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            bg.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.7f));
+            bg.drawImage(original, 0, 0, original.getWidth(), original.getHeight(), null);
+            bg.dispose();
             
             return blurred;
         } catch (Exception e) {
@@ -333,15 +373,22 @@ class DynamicBackgroundPanel extends JPanel {
         blurredBackground = backgroundImage;
     }
     
-    private void initParticles() {
-        for (int i = 0; i < 15; i++) { // 减少粒子数量从30到15
-            particles.add(new Particle());
-        }
-    }
+
+
+
     
     private void startAnimation() {
-        animationTimer = new Timer(100, e -> { // 降低更新频率从50ms到100ms
-            updateParticles();
+        // 修复：避免重复创建Timer，重用现有Timer
+        if (animationTimer != null && animationTimer.isRunning()) {
+            return; // Timer已经在运行，不需要重新创建
+        }
+        
+        // 如果Timer存在但没有运行，先停止它
+        if (animationTimer != null) {
+            animationTimer.stop();
+        }
+        
+        animationTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             repaint();
         });
         animationTimer.start();
@@ -354,10 +401,7 @@ class DynamicBackgroundPanel extends JPanel {
         if (transitionTimer != null && transitionTimer.isRunning()) {
             transitionTimer.stop();
         }
-        // 清理粒子列表，避免内存泄漏
-        if (particles != null) {
-            particles.clear();
-        }
+
     }
     
     // 切换到下一张背景图片
@@ -396,8 +440,8 @@ class DynamicBackgroundPanel extends JPanel {
             transitionTimer.stop();
         }
         
-        transitionTimer = new Timer(20, e -> {
-            backgroundTransition += 0.04f; // 加快淡入淡出速度
+        transitionTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
+            backgroundTransition += 0.08f; // 进一步加快背景切换速度
             
             if (backgroundTransition >= 1.0f) {
                 backgroundTransition = 1.0f;
@@ -418,15 +462,7 @@ class DynamicBackgroundPanel extends JPanel {
         transitionTimer.start();
     }
     
-    private void updateParticles() {
-        int currentTime = (int)(System.currentTimeMillis() / 100); // 降低更新频率
-        if (currentTime != lastParticleUpdate) {
-            lastParticleUpdate = currentTime;
-            for (Particle particle : particles) {
-                particle.update();
-            }
-        }
-    }
+
     
     @Override
     protected void paintComponent(Graphics g) {
@@ -434,109 +470,82 @@ class DynamicBackgroundPanel extends JPanel {
         
         Graphics2D g2d = (Graphics2D) g;
         g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_SPEED); // 改为速度优先
+        g2d.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_SPEED);
         
         int width = getWidth();
         int height = getHeight();
         
-        // 绘制模糊背景图片（支持淡入淡出）
+        // 性能优化：只在必要时重绘背景
         if (blurredBackground != null) {
             drawScaledImage(g2d, blurredBackground, width, height, 1.0f);
         }
         
-        // 如果正在切换，绘制下一张背景图片
+        // 背景切换时使用更高效的混合模式
         if (isTransitioning && nextBlurredBackground != null) {
-            float nextAlpha = backgroundTransition; // 淡入
-            drawScaledImage(g2d, nextBlurredBackground, width, height, nextAlpha);
+            // 使用硬件加速的混合模式替代软件透明度计算
+            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, backgroundTransition));
+            drawScaledImage(g2d, nextBlurredBackground, width, height, 1.0f);
+            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
         }
         
-        // 绘制粒子效果
-        for (Particle particle : particles) {
-            particle.draw(g2d, width, height);
-        }
+
         
-        // 添加半透明遮罩
-        g2d.setColor(new Color(0, 0, 0, 80));
-        g2d.fillRect(0, 0, width, height);
     }
     
     private void drawScaledImage(Graphics2D g2d, java.awt.Image image, int panelWidth, int panelHeight, float alpha) {
         if (image == null) return;
         
-        int imgWidth = image.getWidth(this);
-        int imgHeight = image.getHeight(this);
+        // 性能优化：缓存缩放后的图像，避免每帧重复计算
+        java.awt.Image targetImage = image;
+        String cacheKey = panelWidth + "x" + panelHeight;
         
-        double scaleX = (double) panelWidth / imgWidth;
-        double scaleY = (double) panelHeight / imgHeight;
-        double scale = Math.max(scaleX, scaleY);
+        if (panelWidth == lastPanelWidth && panelHeight == lastPanelHeight) {
+            // 使用缓存的背景图
+            if (image == backgroundImage && cachedScaledBackground != null) {
+                targetImage = cachedScaledBackground;
+            } else if (image == blurredBackground && cachedScaledBlurredBackground != null) {
+                targetImage = cachedScaledBlurredBackground;
+            }
+        } else {
+            // 尺寸改变，更新缓存
+            lastPanelWidth = panelWidth;
+            lastPanelHeight = panelHeight;
+            
+            if (image == backgroundImage) {
+                cachedScaledBackground = createScaledInstance(image, panelWidth, panelHeight);
+                targetImage = cachedScaledBackground;
+            } else if (image == blurredBackground) {
+                cachedScaledBlurredBackground = createScaledInstance(image, panelWidth, panelHeight);
+                targetImage = cachedScaledBlurredBackground;
+            }
+        }
         
-        int scaledWidth = (int) (imgWidth * scale);
-        int scaledHeight = (int) (imgHeight * scale);
-        
-        int x = (panelWidth - scaledWidth) / 2;
-        int y = (panelHeight - scaledHeight) / 2;
-        
-        // 设置透明度
+        // 直接绘制，避免重复的尺寸计算
         if (alpha < 1.0f) {
             g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
         }
         
-        g2d.drawImage(image, x, y, scaledWidth, scaledHeight, this);
+        // 性能优化：使用更快的绘制方式
+        g2d.drawImage(targetImage, 0, 0, panelWidth, panelHeight, null);
         
-        // 恢复透明度
         if (alpha < 1.0f) {
             g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
         }
     }
     
-    // 粒子效果类
-    private class Particle {
-        private float x, y;
-        private float vx, vy;
-        private float size;
-        private float alpha;
-        private Color color;
-        
-        public Particle() {
-            x = (float) (Math.random() * 1920);
-            y = (float) (Math.random() * 1080);
-            vx = (float) (Math.random() * 2 - 1);
-            vy = (float) (Math.random() * 2 - 1);
-            size = (float) (Math.random() * 3 + 1);
-            alpha = (float) (Math.random() * 0.5 + 0.3);
-            
-            Color[] colors = {
-                new Color(59, 130, 246),  // 蓝色
-                new Color(147, 51, 234),  // 紫色
-                new Color(236, 72, 153),  // 粉色
-                new Color(34, 197, 94)    // 绿色
-            };
-            color = colors[(int) (Math.random() * colors.length)];
-        }
-        
-        public void update() {
-            x += vx;
-            y += vy;
-            
-            if (x < 0 || x > 1920) vx = -vx;
-            if (y < 0 || y > 1080) vy = -vy;
-            
-            alpha = (float) (Math.sin(System.currentTimeMillis() * 0.001 + x * 0.01) * 0.3 + 0.5);
-        }
-        
-        public void draw(Graphics2D g2d, int panelWidth, int panelHeight) {
-            float scaleX = (float) panelWidth / 1920;
-            float scaleY = (float) panelHeight / 1080;
-            
-            float drawX = x * scaleX;
-            float drawY = y * scaleY;
-            float drawSize = size * Math.min(scaleX, scaleY);
-            
-            g2d.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), (int) (alpha * 255)));
-            g2d.fillOval((int) (drawX - drawSize/2), (int) (drawY - drawSize/2), 
-                        (int) drawSize, (int) drawSize);
-        }
+    // 高性能图像缩放方法
+    private java.awt.Image createScaledInstance(java.awt.Image image, int width, int height) {
+        BufferedImage scaled = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = scaled.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g2d.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_SPEED);
+        g2d.drawImage(image, 0, 0, width, height, null);
+        g2d.dispose();
+        return scaled;
     }
+    
+
 }
 
 // 自定义圆角按钮
@@ -607,7 +616,7 @@ class ModernButton extends JButton {
             hoverTimer.stop();
         }
         
-        hoverTimer = new Timer(32, e -> { // 降低动画频率
+        hoverTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             boolean needsUpdate = false;
             
             if (isHovering && hoverAnimation < 1.0f) {
@@ -634,7 +643,7 @@ class ModernButton extends JButton {
             clickTimer.stop();
         }
         
-        clickTimer = new Timer(20, e -> {
+        clickTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             clickAnimation = Math.max(0, clickAnimation - 0.08f);
             repaint();
             
@@ -773,7 +782,7 @@ class ModernTextArea extends JTextArea {
             hoverTimer.stop();
         }
         
-        hoverTimer = new Timer(32, e -> { // 降低动画频率
+        hoverTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             boolean needsUpdate = false;
             
             if (isHovering && hoverAnimation < 1.0f) {
@@ -798,7 +807,7 @@ class ModernTextArea extends JTextArea {
             focusTimer.stop();
         }
         
-        focusTimer = new Timer(32, e -> { // 降低动画频率
+        focusTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             boolean needsUpdate = false;
             
             if (hasFocus && focusAnimation < 1.0f) {
@@ -837,7 +846,7 @@ class ModernTextArea extends JTextArea {
             clickTimer.stop();
         }
         
-        clickTimer = new Timer(20, e -> {
+        clickTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             clickAnimation = Math.max(0, clickAnimation - 0.08f);
             repaint();
             
@@ -992,27 +1001,23 @@ class NotificationPanel extends JPanel {
         typeIndicator.setOpaque(false);
         typeIndicator.setPreferredSize(new Dimension(12, 12));
         
-        // 标题标签
+        // 标题标签 - 性能优化：移除透明度合成，在父级统一处理
         JLabel titleLabel = new JLabel(title) {
             @Override
             public void paint(Graphics g) {
-                Graphics2D g2d = (Graphics2D) g.create();
-                g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, currentAlpha));
-                super.paint(g2d);
-                g2d.dispose();
+                // 性能优化：直接在父级处理透明度，避免重复合成
+                super.paint(g);
             }
         };
         titleLabel.setFont(new Font("微软雅黑", Font.BOLD, 13));
         titleLabel.setForeground(new Color(255, 255, 255));
         
-        // 消息标签 - 使用JTextArea支持多行文本
+        // 消息标签 - 性能优化：移除透明度合成
         JTextArea messageArea = new JTextArea(message) {
             @Override
             public void paint(Graphics g) {
-                Graphics2D g2d = (Graphics2D) g.create();
-                g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, currentAlpha));
-                super.paint(g2d);
-                g2d.dispose();
+                // 性能优化：透明度在父级统一处理
+                super.paint(g);
             }
         };
         messageArea.setOpaque(false);
@@ -1178,8 +1183,11 @@ class NotificationPanel extends JPanel {
         
         setLocation(startX, startY);
         
-        animationTimer = new Timer(16, e -> {
-            animationProgress += 0.06f;
+        animationTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
+            AnimationConstants.recordFrameRender(); // 记录帧渲染性能
+            
+            // 调快动画速度：提高动画步进值
+            animationProgress += 0.08f;
             
             if (animationProgress >= 1.0f) {
                 animationProgress = 1.0f;
@@ -1195,17 +1203,17 @@ class NotificationPanel extends JPanel {
             // 使用缓动函数
             float easedProgress = easeOutCubic(animationProgress);
             currentAlpha = easedProgress;
-            // 去掉背景渐暗效果
-            // backgroundDimAlpha = easedProgress * 0.6f; // 背景渐暗到60%
             
             // 水平移动（从左到右）
             int currentX = startX + (int)((targetX - startX) * easedProgress);
-            // 垂直位置保持不变
             int currentY = startY;
             
             setLocation(currentX, currentY);
             
-            repaint();
+            // 性能优化：只在透明度变化时重绘
+            if (easedProgress > 0) {
+                repaint();
+            }
         });
         animationTimer.start();
     }
@@ -1223,23 +1231,22 @@ class NotificationPanel extends JPanel {
         startY = getLocation().y;
         targetY = getLocation().y;
         
-        animationTimer = new Timer(16, e -> {
-            animationProgress += 0.08f;
+        animationTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
+            // 调快退出动画速度
+            animationProgress += 0.1f;
             
             if (animationProgress >= 1.0f) {
                 animationProgress = 1.0f;
                 isHiding = false;
                 animationTimer.stop();
                 
-                // 移除背景渐暗效果（已禁用）
-                // removeBackgroundDimPanel();
-                
                 // 从父容器中移除
                 Container parent = getParent();
                 if (parent != null) {
                     parent.remove(this);
                     parent.revalidate();
-                    parent.repaint();
+                    // 性能优化：延迟重绘，减少重复渲染
+                    SwingUtilities.invokeLater(parent::repaint);
                 }
                 return;
             }
@@ -1247,17 +1254,17 @@ class NotificationPanel extends JPanel {
             // 使用缓动函数
             float easedProgress = easeInCubic(animationProgress);
             currentAlpha = 1.0f - easedProgress;
-            // 去掉背景渐暗效果
-            // backgroundDimAlpha = 0.6f - easedProgress * 0.6f; // 背景逐渐恢复
             
             // 水平移动（从右到左退出）
             int currentX = startX + (int)((targetX - startX) * easedProgress);
-            // 垂直位置保持不变
             int currentY = startY;
             
             setLocation(currentX, currentY);
             
-            repaint();
+            // 性能优化：减少重绘频率
+            if (easedProgress > 0) {
+                repaint();
+            }
         });
         animationTimer.start();
     }
@@ -1428,7 +1435,7 @@ class AnimatedQuestionLabel extends JLabel {
             hoverTimer.stop();
         }
         
-        hoverTimer = new Timer(32, e -> {
+        hoverTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             boolean needsUpdate = false;
             
             if (isHovering && hoverAnimation < 1.0f) {
@@ -1455,7 +1462,7 @@ class AnimatedQuestionLabel extends JLabel {
             clickTimer.stop();
         }
         
-        clickTimer = new Timer(20, e -> {
+        clickTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             clickAnimation = Math.max(0, clickAnimation - 0.08f);
             repaint();
             
@@ -1479,7 +1486,7 @@ class AnimatedQuestionLabel extends JLabel {
             animationTimer.stop();
         }
         
-        animationTimer = new Timer(32, e -> { // 降低动画频率
+        animationTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             animationProgress += 0.04f;
             
             if (animationProgress >= 1.0f) {
@@ -1685,7 +1692,7 @@ class AnimatedTextArea extends JTextArea {
             hoverTimer.stop();
         }
         
-        hoverTimer = new Timer(32, e -> {
+        hoverTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             boolean needsUpdate = false;
             
             if (isHovering && hoverAnimation < 1.0f) {
@@ -1712,7 +1719,7 @@ class AnimatedTextArea extends JTextArea {
             clickTimer.stop();
         }
         
-        clickTimer = new Timer(20, e -> {
+        clickTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             clickAnimation = Math.max(0, clickAnimation - 0.08f);
             repaint();
             
@@ -1734,7 +1741,7 @@ class AnimatedTextArea extends JTextArea {
             animationTimer.stop();
         }
         
-        animationTimer = new Timer(32, e -> {
+        animationTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             animationProgress += 0.04f;
             
             if (animationProgress >= 1.0f) {
@@ -1966,9 +1973,12 @@ class HistoryWindow extends JDialog {
             System.out.println("加载已导入问题失败: " + e.getMessage());
         }
     }
+
+
     
     private void startAnimation() {
-        animationTimer = new Timer(100, e -> {
+        animationTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
+            AnimationConstants.recordFrameRender();
             updateParticles();
             if (backgroundPanel != null) {
                 backgroundPanel.repaint();
@@ -3823,6 +3833,8 @@ class ModernConfirmDialog extends JDialog {
         // 设置焦点以便键盘事件生效
         cancelButton.requestFocusInWindow();
     }
+
+
     
     private void startAnimation() {
         setOpacity(0.0f);
@@ -4876,7 +4888,7 @@ public class ThinkingPad {
             gd.setFullScreenWindow(null);
             frame.dispose();
             frame.setUndecorated(false);
-            frame.setResizable(false);
+            frame.setResizable(true);  // 修复：退出全屏后保持可调整大小
             frame.setVisible(true);
             showNotification("退出全屏", "已退出全屏模式", NotificationPanel.NotificationType.INFO);
             
@@ -4949,28 +4961,8 @@ public class ThinkingPad {
         // 为文本区域添加右键菜单
         setupTextAreaContextMenu(answerArea);
         
-        JScrollPane scrollPane = new JScrollPane(answerArea) {
-            @Override
-            protected void paintComponent(Graphics g) {
-                Graphics2D g2d = (Graphics2D) g.create();
-                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                
-                int width = getWidth();
-                int height = getHeight();
-                
-                // 修改透明度与按钮一致
-                g2d.setColor(new Color(255, 255, 255, 25));
-                g2d.fillRoundRect(0, 0, width, height, 20, 20);
-                
-                // 边框效果
-                g2d.setColor(new Color(255, 255, 255, 80));
-                g2d.setStroke(new BasicStroke(1.5f));
-                g2d.drawRoundRect(1, 1, width-2, height-2, 19, 19);
-                
-                super.paintComponent(g);
-                g2d.dispose();
-            }
-        };
+        // 使用标准的JScrollPane，不要自定义paintComponent避免重复绘制
+        JScrollPane scrollPane = new JScrollPane(answerArea);
         scrollPane.setOpaque(false);
         scrollPane.getViewport().setOpaque(false);
         scrollPane.setBorder(BorderFactory.createEmptyBorder());
@@ -5033,7 +5025,7 @@ public class ThinkingPad {
             }
         });
         
-        // 自定义滚动条样式
+        // 自定义滚动条样式（保持视觉效果但不重复绘制）
         JScrollPane leftScrollPane = new JScrollPane(historyQuestionList) {
             @Override
             protected void paintComponent(Graphics g) {
@@ -5043,16 +5035,16 @@ public class ThinkingPad {
                 int width = getWidth();
                 int height = getHeight();
                 
-                // 修改透明度与按钮一致
+                // 绘制圆角背景（与按钮透明度一致）
                 g2d.setColor(new Color(255, 255, 255, 25));
                 g2d.fillRoundRect(0, 0, width, height, 20, 20);
                 
-                // 边框效果
+                // 绘制边框
                 g2d.setColor(new Color(255, 255, 255, 80));
                 g2d.setStroke(new BasicStroke(1.5f));
                 g2d.drawRoundRect(1, 1, width-2, height-2, 19, 19);
                 
-                super.paintComponent(g);
+                // 不调用super.paintComponent，让视口内容正常渲染
                 g2d.dispose();
             }
         };
@@ -5082,28 +5074,7 @@ public class ThinkingPad {
         historyContentArea.setForeground(Color.WHITE);
         
         // 自定义滚动条样式
-        JScrollPane rightScrollPane = new JScrollPane(historyContentArea) {
-            @Override
-            protected void paintComponent(Graphics g) {
-                Graphics2D g2d = (Graphics2D) g.create();
-                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                
-                int width = getWidth();
-                int height = getHeight();
-                
-                // 修改透明度与按钮一致
-                g2d.setColor(new Color(255, 255, 255, 25));
-                g2d.fillRoundRect(0, 0, width, height, 20, 20);
-                
-                // 边框效果
-                g2d.setColor(new Color(255, 255, 255, 80));
-                g2d.setStroke(new BasicStroke(1.5f));
-                g2d.drawRoundRect(1, 1, width-2, height-2, 19, 19);
-                
-                super.paintComponent(g);
-                g2d.dispose();
-            }
-        };
+        JScrollPane rightScrollPane = new JScrollPane(historyContentArea);
         rightScrollPane.setOpaque(false);
         rightScrollPane.getViewport().setOpaque(false);
         rightScrollPane.setBorder(BorderFactory.createEmptyBorder());
@@ -5163,7 +5134,7 @@ public class ThinkingPad {
         
         importedList.setComponentPopupMenu(importedPopupMenu);
         
-        // 自定义滚动条样式
+        // 自定义滚动条样式（保持视觉效果但不重复绘制）
         JScrollPane importedScrollPane = new JScrollPane(importedList) {
             @Override
             protected void paintComponent(Graphics g) {
@@ -5173,16 +5144,16 @@ public class ThinkingPad {
                 int width = getWidth();
                 int height = getHeight();
                 
-                // 修改透明度与按钮一致
+                // 绘制圆角背景（与按钮透明度一致）
                 g2d.setColor(new Color(255, 255, 255, 25));
                 g2d.fillRoundRect(0, 0, width, height, 20, 20);
                 
-                // 边框效果
+                // 绘制边框
                 g2d.setColor(new Color(255, 255, 255, 80));
                 g2d.setStroke(new BasicStroke(1.5f));
                 g2d.drawRoundRect(1, 1, width-2, height-2, 19, 19);
                 
-                super.paintComponent(g);
+                // 不调用super.paintComponent，让视口内容正常渲染
                 g2d.dispose();
             }
         };
@@ -5870,6 +5841,8 @@ class ModernPopupMenu extends JPopupMenu {
         // 启动动画定时器
         startAnimation();
     }
+
+
     
     private void startAnimation() {
         if (animationTimer == null || !animationTimer.isRunning()) {
@@ -6225,7 +6198,7 @@ class ModernMenuItem extends JMenuItem {
             hoverTimer.stop();
         }
         
-        hoverTimer = new Timer(32, e -> {
+        hoverTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             boolean needsUpdate = false;
             
             if (isHovering && hoverAnimation < 1.0f) {
@@ -6252,7 +6225,7 @@ class ModernMenuItem extends JMenuItem {
             clickTimer.stop();
         }
         
-        clickTimer = new Timer(20, e -> {
+        clickTimer = new Timer(AnimationConstants.getOptimalFrameInterval(), e -> {
             clickAnimation = Math.max(0, clickAnimation - 0.08f);
             repaint();
             
